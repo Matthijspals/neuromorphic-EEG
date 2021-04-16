@@ -1,4 +1,4 @@
-# SpiNNakerEEG
+# Neuromorphic EEG classification for energy efficient brain-computer interfaces
 Code for creating a deep learning based spiking EEG classifier, accompanying: link to paper.
 
 In order to to run the whole pipeline:
