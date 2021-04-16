@@ -1,0 +1,252 @@
+import numpy as np
+import warnings;
+warnings.filterwarnings('ignore');
+import sys
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gs
+import os
+import pickle
+from six.moves import cPickle
+from IPython.display import clear_output
+
+spin=True
+if spin:
+    import pyNN.spiNNaker as pynn
+else:
+    import pyNN.nest as pynn
+
+#set sim parameters
+participants = np.arange(1,2)
+n_classes = 2
+plot=False
+sim_time = 50
+dt = 0.1
+refrac = dt
+sample = False #sample randomly from val set
+weight_scale = 100
+rescale_fac = 0.1/dt
+
+cell_params = {
+    'v_thresh' : 1,
+    'tau_refrac' : refrac,
+    'v_reset' : 0,
+    'v_rest' : 0,
+    'cm' : 1,
+    'tau_m' : 1000,
+    'tau_syn_E' : 0.01,
+    'tau_syn_I' : 0.01
+} 
+
+#slightly modified load function from snn toolbox
+def load_assembly(path, filename, sim):
+    """Load the populations in an assembly.
+
+    Loads the populations in an assembly that was saved with the
+    `save_assembly` function.
+
+    The term "assembly" refers to pyNN internal nomenclature, where
+    ``Assembly`` is a collection of layers (``Populations``), which in turn
+    consist of a number of neurons (``cells``).
+
+    Parameters
+    ----------
+
+    path: str
+        Path to directory where to load model from.
+
+    filename: str
+        Name of file to load model from.
+
+    Returns
+    -------
+
+    layers: list[pyNN.Population]
+        List of pyNN ``Population`` objects.
+    """
+
+    filepath = os.path.join(path, filename)
+    assert os.path.isfile(filepath), \
+        "Spiking neuron layers were not found at specified location."
+    if sys.version_info < (3,):
+        s = cPickle.load(open(filepath, 'rb'))
+    else:
+        s = cPickle.load(open(filepath, 'rb'), encoding='bytes')
+
+    # Iterate over populations in assembly
+    layers = []
+    n_neurons = []
+    for label in s['labels']:
+        celltype = getattr(sim, s[label]['celltype'])
+        n_neurons.append(s[label]['size'])
+        population = sim.Population(s[label]['size'], celltype,
+                                            celltype.default_parameters,
+                                            structure=s[label]['structure'],
+                                            label=label)
+        # Set the rest of the specified variables, if any.
+        for variable in s['variables']:
+            if getattr(population, variable, None) is None:
+                setattr(population, variable, s[label][variable])
+        if label != 'InputLayer':
+            population.set(i_offset=s[label]['i_offset'])
+        layers.append(population)
+
+    return layers, s['labels'], n_neurons
+
+#scale_fact = [1, 0.28822933191061173, 0.8628354856371916, 1.5576353278160104, 0.757976320922376]    
+# run for every fold (now just 4)
+accs_all = []
+stds_all = []
+for part in participants:
+    allfoldacc=[]
+    for fold in np.arange(0,5):
+        pynn.setup(dt, min_delay=dt)
+        if spin:
+            pynn.set_number_of_neurons_per_core(pynn.IF_curr_exp, 64)
+
+        path = "models/subject_"+str(part)+"/fold"+str(fold)
+        #load data
+        #if sample:
+        #    test_ind = np.random.randint(0,80,num_test)
+        #else:
+        #    test_ind = np.arange(0,num_test)
+        test_data = np.load(path+"/x_test.npz")['arr_0']#[test_ind]
+        test_labels = np.load(path+"/y_test.npz")['arr_0']#[test_ind]
+        pred_labels = []
+        num_test=len(test_data)
+        #create network
+
+        network, labels, n_neurons = load_assembly(path, "tsfold"+str(fold)+"_nest", pynn)
+        for l in range(len(network)-1):
+            conn = np.genfromtxt(path + "/" + labels[l+1])
+            #conn[:,2] *= scale_fact[l]
+            #pynn.Projection(network[l], network[l+1], pynn.FromListConnector(conn, ['weight', 'delay']))
+
+            #        when we switch to spinnaker we need to split the connection in ex and inh:
+            ex = conn[conn[:,2]>0]
+            inh = conn[conn[:,2]<0]
+            if ex.any():
+                ex[:,2] *= weight_scale
+                pynn.Projection(network[l], network[l+1], pynn.FromListConnector(ex, ['weight', 'delay']), receptor_type='excitatory')
+            if inh.any():
+                inh[:,2] *= weight_scale
+                pynn.Projection(network[l], network[l+1], pynn.FromListConnector(inh, ['weight', 'delay']), receptor_type='inhibitory')
+
+
+
+            network[l + 1].set(**cell_params)
+            network[l + 1].initialize(v=network[l + 1].get('v_rest'))
+            """
+            Biases should be already be loaded from the assembly file.
+            Otherwise do this:
+            filepath = os.path.join(path, self.layers[l + 1].label+'_biases')
+            biases = np.loadtxt(filepath)
+            self.layers[l + 1].set(i_offset=biases*self._dt/1e2)
+            """
+
+        network[-1].record("spikes")
+        print("NUM 1")
+        print(np.sum(test_labels[:,1])/len(test_labels))
+        #run experiment
+        for trial, j in enumerate(test_data):
+
+            spiketrains_all=[]
+            x_flat = np.ravel(j)
+            rates = 1000 * x_flat / rescale_fac
+            network[0].set(rate=rates)
+
+            #run simulation
+            pynn.run(sim_time)
+
+            #get spikes
+            #spikelist =[]
+
+            for ind, n in enumerate(n_neurons):
+                shape = (n, int(sim_time/dt))
+                spiketrains = network[ind].get_data(clear=True).segments[-1].spiketrains
+                spiketrains_flat = np.zeros(shape)
+                for k, spiketrain in enumerate(spiketrains):
+                    for t in spiketrain:
+                        spiketrains_flat[k, int(t / dt)] = 1
+
+                #get spikes for plotting
+                spiketrains_all.append(spiketrains_flat)
+            spikesum = np.sum(spiketrains_flat, axis = 1)
+            estimate = np.argmax(spikesum+np.random.randn(n_classes)*0.001)
+            pred_labels.append(np.eye(n_classes)[estimate])
+            clear_output(wait=True)
+            print('part ' +str(part) + ' fold ' + str(fold) + ' trial ' +str(trial) + ' of ' +str(len(test_data)))
+            print('estimate = ' + str(estimate))
+            print('true = ' + str(test_labels[trial]))
+            print(spikesum)
+            pynn.reset()
+
+
+
+
+        #end simulation
+        pynn.end()
+
+        print('simulation end')
+        if plot:
+            s = []
+            a = []
+            i = 0
+            colors = 'black'
+            lineoffsets = 1
+            linelengths = 2
+            fig, axs = plt.subplots(3,2, figsize=(10,9))
+            axs[-1, -1].axis('off')
+
+            for spiketrain, n in zip(spiketrains_all, n_neurons):
+                eventdata = []
+                for dat in spiketrain:
+                    eventdata.append(np.nonzero(dat)[0])
+                    #print(np.nonzero(dat)[0])
+                #plt.figure()
+                if i==4:
+                    linelengths=1
+                axs[i%3, i//3].eventplot(eventdata, colors=colors, lineoffsets=lineoffsets,
+                                linelengths=linelengths)
+                axs[i%3, i//3].set_xlim(0, int(sim_time/dt))
+                axs[i%3, i//3].set_xticks(np.arange(0, int(sim_time/dt)+1, int(10/dt)))
+                axs[i%3, i//3].set_xticklabels([])
+                axs[i%3, i//3].set_ylim(-0.5, n+.5)
+                #plt.xlabel("time (ms)")
+                #plt.ylabel("neuron no")
+                i+=1
+
+            axs[2,0].set_xlabel("time (ms)")
+            axs[2,0].set_xticklabels([0,10,20,30,40,50])
+            axs[1,1].set_xlabel("time (ms)")
+            axs[1,1].set_xticklabels([0,10,20,30,40,50])
+            axs[0,0].set_ylabel("neuron no")
+            axs[1,0].set_ylabel("neuron no")
+            axs[2,0].set_ylabel("neuron no")
+
+            axs[0,0].set_title("Input")
+            axs[1,0].set_title("Conv 1")
+            axs[2,0].set_title("Conv 2")
+            axs[0,1].set_title("Conv 3")
+            axs[1,1].set_title("Output")
+            plt.savefig("spikes_plot.png")
+
+            print('plot end')
+
+
+        good_preds=0.0
+        for p in range(len(pred_labels)):
+            good_preds +=np.dot(pred_labels[p], test_labels[p])
+        print("accuracy: "+str(good_preds/(p+1)))
+        allfoldacc.append(good_preds/(p+1))
+
+
+    for i in range(len(allfoldacc)):
+        allfoldacc[i]*=100
+    print(allfoldacc)
+    print("all fold acc: " + str(np.mean(allfoldacc)) + " +- " + str(np.std(allfoldacc)))
+    accs_all.append(np.mean(allfoldacc))
+    stds_all.append(np.std(allfoldacc))
+print(accs_all)
+print(stds_all)
