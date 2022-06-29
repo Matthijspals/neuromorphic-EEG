@@ -1,5 +1,5 @@
 # Neuromorphic EEG classification for energy efficient brain-computer interfaces
-Code for creating a deep learning based spiking EEG classifier, accompanying: link to paper.
+Code for creating a deep learning based spiking EEG classifier, accompanying: https://ieeexplore.ieee.org/abstract/document/9629621
 
 In order to to run the whole pipeline:
 1. Use train_CNNs.ipynb to train CNNs on Graz IV 2b (http://www.bbci.de/competition/iv/, load with moabb)
